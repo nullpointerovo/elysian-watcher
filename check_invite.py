@@ -217,10 +217,10 @@ def send_pushover(title, message, priority=1):
 # =========================
 
 def send_open_alert():
-    title = "🚨 Elysian Horizon 开放了！"
+    title = "🚨 旅程闹钟｜Elysian Horizon 开放了！"
 
     message = (
-        "旅程 Discord 邀请现在已经开放！\n\n"
+        "旅程闹钟！Discord 邀请现在已经开放！\n\n"
         "赶紧点击链接加入：\n"
         f"{INVITE_URL}"
     )
@@ -231,7 +231,7 @@ def send_open_alert():
     send_notification(
         title,
         (
-            "Discord 邀请码现在已经开放！赶紧加入！\n\n"
+            "旅程闹钟！Discord 邀请码现在已经开放！赶紧加入！\n\n"
             f"链接：{INVITE_URL}"
         )
     )
@@ -248,10 +248,10 @@ def send_open_alert():
 
 
 def send_reminder_alert():
-    title = "⚠️ Elysian Horizon 仍然开放中"
+    title = "⚠️ 旅程闹钟｜Elysian Horizon 仍然开放中"
 
     message = (
-        "旅程的 Discord 邀请仍然开放！\n\n"
+        "旅程闹钟！旅程的 Discord 邀请仍然开放！\n\n"
         f"点击加入：{INVITE_URL}\n\n"
         f"每 {REMIND_AFTER_MINUTES} 分钟提醒一次。"
     )
@@ -261,7 +261,7 @@ def send_reminder_alert():
     send_notification(
         title,
         (
-            f"Discord 邀请仍然开放！\n\n"
+            f"旅程闹钟！Discord 邀请仍然开放！\n\n"
             f"链接：{INVITE_URL}\n\n"
             f"每 {REMIND_AFTER_MINUTES} 分钟提醒一次。"
         )
