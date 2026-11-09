@@ -1,0 +1,65 @@
+
+name: Test Pushover Notification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 测试 iPhone 推送
+        env:
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
+
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import requests
+
+          user_key = os.environ.get("PUSHOVER_USER_KEY", "").strip()
+          api_token = os.environ.get("PUSHOVER_API_TOKEN", "").strip()
+
+          if not user_key or not api_token:
+              print("错误：没有读取到 Pushover Secrets")
+              sys.exit(1)
+
+          payload = {
+              "token": api_token,
+              "user": user_key,
+              "title": "🧪 旅程监控测试成功！",
+              "message": (
+                  "恭喜！Pushover 已经连接成功。\n\n"
+                  "这是一条普通高优先级测试通知。\n\n"
+                  "正式开放提醒将使用紧急优先级。\n\n"
+                  "https://discord.gg/elysianhorizon"
+              ),
+              "priority": 1
+          }
+
+          try:
+              response = requests.post(
+                  "https://api.pushover.net/1/messages.json",
+                  data=payload,
+                  timeout=20
+              )
+
+              result = response.json()
+              print("Pushover 返回状态：", result.get("status"))
+
+              if response.ok and result.get("status") == 1:
+                  print("iPhone 推送发送成功！")
+              else:
+                  print("推送失败：", result)
+                  sys.exit(1)
+
+          except Exception as e:
+              print("请求异常：", str(e))
+              sys.exit(1)
+          PY
