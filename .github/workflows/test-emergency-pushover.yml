@@ -1,67 +1,25 @@
-name: Test Emergency Pushover Alert
+
+name: Test Emergency Pushover
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 发送 iPhone 紧急警报
+      - name: Send emergency test
         env:
-          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
-          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
-
+          USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
         run: |
-          python - <<'PY'
-          import os
-          import sys
-          import requests
-
-          user_key = os.environ.get("PUSHOVER_USER_KEY", "").strip()
-          api_token = os.environ.get("PUSHOVER_API_TOKEN", "").strip()
-
-          if not user_key or not api_token:
-              print("错误：缺少 Pushover Secrets")
-              sys.exit(1)
-
-          payload = {
-              "token": api_token,
-              "user": user_key,
-              "title": "🚨 紧急警报测试",
-              "message": (
-                  "这是旅程监控的紧急提醒测试！\n\n"
-                  "请确认 iPhone 是否正常播放警报声音。\n\n"
-                  "测试重复间隔：30 秒\n"
-                  "测试最长持续：120 秒\n\n"
-                  "确认通知即可停止重复提醒。"
-              ),
-              "priority": 2,
-              "retry": 30,
-              "expire": 120
-          }
-
-          try:
-              response = requests.post(
-                  "https://api.pushover.net/1/messages.json",
-                  data=payload,
-                  timeout=20
-              )
-
-              result = response.json()
-              print("Pushover 返回：", result)
-
-              if response.ok and result.get("status") == 1:
-                  print("紧急警报发送成功！")
-              else:
-                  print("发送失败")
-                  sys.exit(1)
-
-          except Exception as e:
-              print("请求异常：", str(e))
-              sys.exit(1)
-          PY
+          curl --fail-with-body \
+            --form-string "token=$API_TOKEN" \
+            --form-string "user=$USER_KEY" \
+            --form-string "title=Journey Watcher Test" \
+            --form-string "message=Alien Alarm sound test. Please acknowledge this notification." \
+            --form-string "priority=2" \
+            --form-string "retry=30" \
+            --form-string "expire=120" \
+            --form-string "sound=alien" \
+            https://api.pushover.net/1/messages.json
