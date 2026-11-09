@@ -1,0 +1,64 @@
+
+name: Test ServerChan Notification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 发送微信测试通知
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.parse
+          import sys
+
+          key = os.environ.get("SERVERCHAN_SENDKEY", "").strip()
+
+          if not key:
+              print("错误：没有读取到 SERVERCHAN_SENDKEY")
+              sys.exit(1)
+
+          url = f"https://sctapi.ftqq.com/{key}.send"
+
+          data = urllib.parse.urlencode({
+              "title": "🧪 旅程监控测试成功！",
+              "desp": (
+                  "恭喜！微信通知通道已经连接成功。\\n\\n"
+                  "旅程开门监控正在待命。\\n\\n"
+                  "下一步：配置 iPhone 强提醒。"
+              )
+          }).encode("utf-8")
+
+          request = urllib.request.Request(
+              url,
+              data=data,
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  result = json.loads(response.read().decode("utf-8"))
+
+              print("Server酱返回：", result)
+
+              if result.get("code") == 0:
+                  print("测试通知发送成功！")
+              else:
+                  print("发送失败，请检查 Server酱配置。")
+                  sys.exit(1)
+
+          except Exception as e:
+              print("通知发送异常：", str(e))
+              sys.exit(1)
+          PY
