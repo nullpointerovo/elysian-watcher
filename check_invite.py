@@ -1,25 +1,12 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Elysian Horizon Discord 邀请码监控脚本
-=====================================
-
-这个脚本会定期检查指定的 Discord 邀请码（默认是 ``elysianhorizon``）当前
-是处于「开放」还是「暂停」状态，并在状态从「暂停」变为「开放」时，通过
-Server酱（Server Chan）向你的微信推送通知。
-
-整体流程：
-1. 读取上一次保存的状态（保存在 state.json 文件里）。
-2. 调用 Discord 官方 API 查询邀请码现在的状态。
-3. 对比新旧状态，决定要不要发送通知：
-   - 第一次发现「开放」          -> 发送「🚨 Elysian Horizon开放了！」
-   - 已经开放且持续超过 30 分钟  -> 发送「⚠️ Elysian Horizon仍然开放中」
-4. 把最新状态写回 state.json，供下一次运行时对比。
-
-这个脚本被设计为在 GitHub Actions 里每 10 分钟运行一次。因为 GitHub Actions
-的运行环境是「一次性」的（每次跑完就销毁），所以我们把状态保存到仓库里的
-state.json 文件中，并在 workflow 里把它提交（commit）回仓库，这样下一次运行
-时就能读到上一次的状态了。
+Elysian Horizon Discord 邀请码监控
+同时支持：
+1. Server酱微信通知
+2. Pushover iPhone 推送
 """
 
 import json
@@ -30,56 +17,54 @@ from datetime import datetime, timezone
 import requests
 
 
-# ---------------------------------------------------------------------------
-# 配置区：这些值你一般不需要改，如有需要可以通过环境变量覆盖。
-# ---------------------------------------------------------------------------
+# =========================
+# 配置
+# =========================
 
-# 要监控的 Discord 邀请码（就是邀请链接 https://discord.gg/XXXX 里的 XXXX 部分）。
 INVITE_CODE = os.environ.get("INVITE_CODE", "elysianhorizon")
 
-# Server酱 的 SendKey，从环境变量读取（在 GitHub Secrets 里配置为 SERVERCHAN_SENDKEY）。
 SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "")
 
-# 保存状态的文件名。
+PUSHOVER_USER_KEY = os.environ.get("PUSHOVER_USER_KEY", "")
+PUSHOVER_API_TOKEN = os.environ.get("PUSHOVER_API_TOKEN", "")
+
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 
-# 「仍然开放」提醒的间隔（分钟）。开放后每隔这么久就再提醒一次，直到关闭为止。
-REMIND_AFTER_MINUTES = int(os.environ.get("REMIND_AFTER_MINUTES", "30"))
+REMIND_AFTER_MINUTES = int(
+    os.environ.get("REMIND_AFTER_MINUTES", "30")
+)
 
-# 「心跳」通知的间隔（小时）。每隔这么久发一条「监控正常运行中」的微信，
-# 让你即使状态没变化也能确认脚本还活着。设为 0 可关闭心跳。
-HEARTBEAT_INTERVAL_HOURS = float(os.environ.get("HEARTBEAT_INTERVAL_HOURS", "24"))
+HEARTBEAT_INTERVAL_HOURS = float(
+    os.environ.get("HEARTBEAT_INTERVAL_HOURS", "24")
+)
 
-# Discord API 地址。with_counts=true 让接口顺便返回服务器的在线/成员人数。
-DISCORD_API_URL = f"https://discord.com/api/v10/invites/{INVITE_CODE}?with_counts=true"
+# Pushover 紧急通知：每 60 秒重发，最多持续 1 小时
+PUSHOVER_RETRY_SECONDS = 60
+PUSHOVER_EXPIRE_SECONDS = 3600
 
-# Discord 要求请求里必须带 User-Agent，否则可能会被拒绝。
+INVITE_URL = f"https://discord.gg/{INVITE_CODE}"
+
+DISCORD_API_URL = (
+    f"https://discord.com/api/v10/invites/"
+    f"{INVITE_CODE}?with_counts=true"
+)
+
 REQUEST_HEADERS = {
-    "User-Agent": "ElysianWatcher/1.0 (+https://github.com/cyanusay/elysian-watcher)"
+    "User-Agent": (
+        "ElysianWatcher/1.0 "
+        "(+https://github.com/cyanusay/elysian-watcher)"
+    )
 }
 
 
-# ---------------------------------------------------------------------------
-# 状态读写：把监控状态保存到本地 JSON 文件，方便跨次运行对比。
-# ---------------------------------------------------------------------------
+# =========================
+# 状态读写
+# =========================
 
 def load_state():
-    """读取上一次保存的状态。
-
-    如果文件不存在（比如第一次运行），就返回一个「初始状态」。
-
-    状态字段说明：
-        status         当前状态："paused"（暂停）或 "open"（开放）。
-        open_since     最近一次变为开放的时间（ISO 格式字符串），暂停时为 None。
-        notified_open  是否已经发过「开放了」的通知。
-        last_remind_at 上次发送「仍然开放」提醒的时间（ISO 格式字符串）。
-                       用它来实现「每隔 30 分钟重复提醒一次」。
-        last_heartbeat 上次发送「心跳」通知的时间（ISO 格式字符串）。
-                       用它来实现「每隔 24 小时确认一次脚本还活着」。
-    """
     if not os.path.exists(STATE_FILE):
         return {
-            "status": "paused",       # 题目说明：当前初始状态为「邀请已暂停」。
+            "status": "paused",
             "open_since": None,
             "notified_open": False,
             "last_remind_at": None,
@@ -91,202 +76,306 @@ def load_state():
 
 
 def save_state(state):
-    """把最新状态写回 JSON 文件。"""
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
     print(f"[状态] 已保存到 {STATE_FILE}: {state}")
 
 
-# ---------------------------------------------------------------------------
-# 核心：查询 Discord 邀请码当前状态。
-# ---------------------------------------------------------------------------
+# =========================
+# Discord 状态检测
+# =========================
 
 def check_invite_status():
-    """查询 Discord 邀请码现在是「开放」还是「暂停/失效」。
-
-    返回字符串 "open" 或 "paused"。
-
-    判断逻辑（重点）：
-        - Discord 在暂停邀请（Pause Invites）时，接口**仍然返回 HTTP 200** 并带有
-          完整的服务器数据，所以**不能只看状态码**！真正的暂停标志是
-          guild.features 数组里是否包含 "INVITES_DISABLED"。
-        - 因此判断规则是：
-            * HTTP 200 且 features 里**没有** INVITES_DISABLED  -> open（开放）
-            * HTTP 200 但 features 里**有** INVITES_DISABLED      -> paused（暂停）
-            * 邀请失效/不存在（404 等）                          -> paused（暂停）
-    """
     try:
-        resp = requests.get(DISCORD_API_URL, headers=REQUEST_HEADERS, timeout=15)
+        resp = requests.get(
+            DISCORD_API_URL,
+            headers=REQUEST_HEADERS,
+            timeout=15
+        )
     except requests.RequestException as e:
-        # 网络异常时，为了安全起见当作「暂停」处理，避免误报开放。
         print(f"[警告] 请求 Discord API 失败: {e}")
         return "paused"
 
     print(f"[查询] HTTP 状态码: {resp.status_code}")
 
-    # 邀请有效：HTTP 200 且响应里没有错误码 code。
     if resp.status_code == 200:
         try:
             data = resp.json()
         except ValueError:
-            print("[警告] 响应不是合法 JSON，当作暂停处理。")
+            print("[警告] 响应不是合法 JSON。")
             return "paused"
 
-        # 正常的邀请数据里 "code" 等于邀请码本身，并且包含 guild 信息；
-        # 错误响应里 "code" 是一个数字错误码。先确认这是一份正常的邀请数据。
         if data.get("code") != INVITE_CODE and "guild" not in data:
-            print(f"[查询] 返回 200 但内容异常: {data} -> 暂停(paused)")
+            print("[查询] 返回内容异常，按暂停处理。")
             return "paused"
 
-        # 关键：检查服务器是否开启了「暂停邀请」。
         features = data.get("guild", {}).get("features", [])
+
         if "INVITES_DISABLED" in features:
-            print("[查询] 检测到 INVITES_DISABLED -> 邀请已暂停(paused)")
+            print("[查询] 检测到 INVITES_DISABLED -> 暂停")
             return "paused"
 
-        print("[查询] 邀请有效且未暂停 -> 开放(open)")
+        print("[查询] 邀请有效且未暂停 -> 开放")
         return "open"
 
-    # 其它情况（404 等）一律视为暂停/失效。
-    print(f"[查询] 邀请不可用(状态码 {resp.status_code}) -> 暂停(paused)")
+    print(f"[查询] 邀请不可用，HTTP {resp.status_code} -> 暂停")
     return "paused"
 
 
-# ---------------------------------------------------------------------------
-# 通知：通过 Server酱 推送微信通知。
-# ---------------------------------------------------------------------------
+# =========================
+# 微信通知：Server酱
+# =========================
 
 def send_notification(title, content=""):
-    """通过 Server酱（Server Chan Turbo）发送微信服务通知。
-
-    参数：
-        title    通知标题（微信里看到的主标题）。
-        content  通知正文，支持 Markdown。
-
-    Server酱 的接口地址是 https://sctapi.ftqq.com/<SendKey>.send
-    """
     if not SERVERCHAN_SENDKEY:
-        print("[错误] 未配置 SERVERCHAN_SENDKEY，无法发送通知。")
+        print("[微信] 未配置 SERVERCHAN_SENDKEY，跳过微信通知。")
         return False
 
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-    payload = {"title": title, "desp": content}
 
     try:
-        resp = requests.post(url, data=payload, timeout=15)
+        resp = requests.post(
+            url,
+            data={"title": title, "desp": content},
+            timeout=15
+        )
         result = resp.json()
+
     except requests.RequestException as e:
-        print(f"[错误] 发送通知请求失败: {e}")
-        return False
-    except ValueError:
-        print(f"[错误] 通知接口返回非 JSON: {resp.text}")
+        print(f"[微信] 请求失败: {e}")
         return False
 
-    # Server酱 成功时返回 {"code": 0, ...}
+    except ValueError:
+        print("[微信] 接口返回非 JSON。")
+        return False
+
     if result.get("code") == 0:
-        print(f"[通知] 发送成功: {title}")
+        print(f"[微信] 发送成功: {title}")
         return True
 
-    print(f"[错误] 通知发送失败: {result}")
+    print(f"[微信] 发送失败: {result}")
     return False
 
 
-# ---------------------------------------------------------------------------
-# 主流程：把上面的部件组合起来。
-# ---------------------------------------------------------------------------
+# =========================
+# iPhone 通知：Pushover
+# =========================
+
+def send_pushover(title, message, priority=1):
+    """
+    priority=1：高优先级，绕过 Pushover quiet hours。
+    priority=2：紧急优先级，重复提醒直到用户确认。
+    """
+
+    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
+        print("[iPhone] 未配置 Pushover Secrets，跳过推送。")
+        return False
+
+    payload = {
+        "token": PUSHOVER_API_TOKEN,
+        "user": PUSHOVER_USER_KEY,
+        "title": title,
+        "message": message,
+        "priority": priority,
+    }
+
+    if priority == 2:
+        payload["retry"] = PUSHOVER_RETRY_SECONDS
+        payload["expire"] = PUSHOVER_EXPIRE_SECONDS
+
+    try:
+        resp = requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data=payload,
+            timeout=20
+        )
+
+        try:
+            result = resp.json()
+        except ValueError:
+            print(f"[iPhone] 返回非 JSON，HTTP {resp.status_code}")
+            return False
+
+    except requests.RequestException as e:
+        print(f"[iPhone] 推送请求失败: {e}")
+        return False
+
+    if resp.ok and result.get("status") == 1:
+        if priority == 2:
+            print("[iPhone] 紧急推送成功，等待用户确认。")
+        else:
+            print("[iPhone] 高优先级推送成功。")
+        return True
+
+    print(f"[iPhone] 推送失败: {result}")
+    return False
+
+
+# =========================
+# 双通道通知
+# =========================
+
+def send_open_alert():
+    title = "🚨 Elysian Horizon 开放了！"
+
+    message = (
+        "旅程 Discord 邀请现在已经开放！\n\n"
+        "赶紧点击链接加入：\n"
+        f"{INVITE_URL}"
+    )
+
+    print("[通知] 发送首次开放提醒。")
+
+    # 微信主通知
+    send_notification(
+        title,
+        (
+            "Discord 邀请码现在已经开放！赶紧加入！\n\n"
+            f"链接：{INVITE_URL}"
+        )
+    )
+
+    # 微信单独链接通知，保留原来的行为
+    send_notification(INVITE_URL)
+
+    # iPhone 紧急通知
+    send_pushover(
+        title,
+        message,
+        priority=2
+    )
+
+
+def send_reminder_alert():
+    title = "⚠️ Elysian Horizon 仍然开放中"
+
+    message = (
+        "旅程的 Discord 邀请仍然开放！\n\n"
+        f"点击加入：{INVITE_URL}\n\n"
+        f"每 {REMIND_AFTER_MINUTES} 分钟提醒一次。"
+    )
+
+    print("[通知] 发送持续开放提醒。")
+
+    send_notification(
+        title,
+        (
+            f"Discord 邀请仍然开放！\n\n"
+            f"链接：{INVITE_URL}\n\n"
+            f"每 {REMIND_AFTER_MINUTES} 分钟提醒一次。"
+        )
+    )
+
+    send_pushover(
+        title,
+        message,
+        priority=1
+    )
+
+
+# =========================
+# 主流程
+# =========================
 
 def main():
-    # 当前时间（统一用 UTC，避免时区混乱）。
     now = datetime.now(timezone.utc)
 
-    # 1. 读取旧状态。
     state = load_state()
     print(f"[状态] 读取到旧状态: {state}")
 
-    # 2. 查询当前状态。
     current_status = check_invite_status()
 
-    # 3. 根据新旧状态决定要不要发通知。
     if current_status == "open":
+
         if state["status"] != "open":
-            # —— 情况 A：从「暂停」变成「开放」（首次发现开放）——
-            print("[判断] 状态变化：暂停 -> 开放，发送首次开放通知。")
-            send_notification(
-                "🚨 Elysian Horizon开放了！",
-                "Discord 邀请码 `elysianhorizon` 现在已经开放，赶紧加入！\n\n"
-                f"链接: https://discord.gg/{INVITE_CODE}",
-            )
-            # 紧接着再单独发一条「纯链接」通知，标题就是链接本身，方便直接长按复制。
-            send_notification(f"https://discord.gg/{INVITE_CODE}")
-            # 记录开放起始时间，并把「上次提醒时间」设为现在（首次开放通知就算一次提醒），
-            # 这样接下来每隔 30 分钟才会再发「仍然开放」提醒。
+            # 暂停 -> 开放
+            print("[判断] 状态变化：暂停 -> 开放")
+
+            send_open_alert()
+
             state["status"] = "open"
             state["open_since"] = now.isoformat()
             state["notified_open"] = True
             state["last_remind_at"] = now.isoformat()
+
         else:
-            # —— 情况 B：之前就已经开放，检查距离上次提醒是否又过了 30 分钟 ——
-            # 用「上次提醒时间」来判断，从而实现每 30 分钟重复提醒一次，直到关闭为止。
-            last_remind_at = state.get("last_remind_at") or state.get("open_since")
+            # 已经开放，检查提醒间隔
+            last_remind_at = (
+                state.get("last_remind_at")
+                or state.get("open_since")
+            )
+
             if last_remind_at:
                 last_remind = datetime.fromisoformat(last_remind_at)
-                elapsed_minutes = (now - last_remind).total_seconds() / 60.0
-                print(f"[判断] 距离上次提醒约 {elapsed_minutes:.1f} 分钟。")
+
+                elapsed_minutes = (
+                    now - last_remind
+                ).total_seconds() / 60.0
+
+                print(
+                    f"[判断] 距离上次提醒约 "
+                    f"{elapsed_minutes:.1f} 分钟。"
+                )
 
                 if elapsed_minutes >= REMIND_AFTER_MINUTES:
-                    print("[判断] 距上次提醒已满间隔，再次发送「仍然开放」提醒。")
-                    send_notification(
-                        "⚠️ Elysian Horizon仍然开放中",
-                        f"Discord 邀请码 `elysianhorizon` 依然处于开放状态，可以加入！\n\n"
-                        f"（每 {REMIND_AFTER_MINUTES} 分钟提醒一次，直到关闭为止）\n\n"
-                        f"链接: https://discord.gg/{INVITE_CODE}",
-                    )
-                    # 更新「上次提醒时间」，开始下一个 30 分钟的计时。
+                    send_reminder_alert()
                     state["last_remind_at"] = now.isoformat()
+
             else:
-                print("[判断] 仍然开放，但无需再次通知。")
+                print("[判断] 仍然开放，但没有提醒时间记录。")
+
     else:
-        # —— 情况 C：当前是暂停状态 ——
+        # 暂停状态
         if state["status"] != "paused":
-            print("[判断] 状态变化：开放 -> 暂停，重置状态。")
+            print("[判断] 状态变化：开放 -> 暂停")
+
         else:
             print("[判断] 仍然暂停，无需通知。")
-        # 重置为暂停状态，清空开放相关记录，方便下次重新开放时能再次提醒。
+
         state["status"] = "paused"
         state["open_since"] = None
         state["notified_open"] = False
         state["last_remind_at"] = None
 
-    # 4. 心跳：每隔 HEARTBEAT_INTERVAL_HOURS 小时发一条「监控正常」通知，
-    #    这样即使状态长期不变，你也能在微信里确认脚本还在正常运行。
+    # 24 小时心跳：只发微信，不打扰 iPhone
     if HEARTBEAT_INTERVAL_HOURS > 0:
+
         last_heartbeat = state.get("last_heartbeat")
-        # 距上次心跳的小时数；从没发过则视为「早就该发了」。
+
         if last_heartbeat:
-            hb_elapsed_hours = (now - datetime.fromisoformat(last_heartbeat)).total_seconds() / 3600.0
+            hb_elapsed_hours = (
+                now - datetime.fromisoformat(last_heartbeat)
+            ).total_seconds() / 3600.0
         else:
-            hb_elapsed_hours = HEARTBEAT_INTERVAL_HOURS  # 触发首次心跳
+            hb_elapsed_hours = HEARTBEAT_INTERVAL_HOURS
 
         if hb_elapsed_hours >= HEARTBEAT_INTERVAL_HOURS:
-            # 用中文描述当前状态，方便一眼看懂。
-            status_cn = "开放中 ✅" if state["status"] == "open" else "暂停中 ⏸️"
-            print("[心跳] 距上次心跳已满间隔，发送「监控正常」通知。")
+
+            status_cn = (
+                "开放中 ✅"
+                if state["status"] == "open"
+                else "暂停中 ⏸️"
+            )
+
+            print("[心跳] 发送微信监控心跳。")
+
             send_notification(
                 "✅ Elysian 监控正常运行中",
-                f"脚本运行正常。当前邀请状态：**{status_cn}**\n\n"
-                f"（这是每 {HEARTBEAT_INTERVAL_HOURS:.0f} 小时一次的例行心跳，"
-                f"用于确认监控还活着，无需理会）",
+                (
+                    f"脚本运行正常。当前邀请状态：**{status_cn}**\n\n"
+                    f"每 {HEARTBEAT_INTERVAL_HOURS:.0f} 小时发送一次。"
+                )
             )
+
             state["last_heartbeat"] = now.isoformat()
 
-    # 5. 保存最新状态。
     save_state(state)
 
 
 if __name__ == "__main__":
-    # 用 try/except 包一层，保证脚本异常时以非 0 退出码结束，便于在 Actions 里发现问题。
     try:
         main()
-    except Exception as e:  # noqa: BLE001 - 这里有意捕获所有异常并打印
+    except Exception as e:
         print(f"[致命错误] 脚本运行出错: {e}")
         sys.exit(1)
